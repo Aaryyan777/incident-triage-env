@@ -1,0 +1,53 @@
+{
+  "model": "Qwen/Qwen2.5-72B-Instruct",
+  "api_base_url": "https://router.huggingface.co/v1",
+  "mode": "heuristic",
+  "runtime_seconds": 0.0,
+  "results": [
+    {
+      "task_id": "task_1_classify",
+      "task_name": "Severity Classification & Team Assignment",
+      "difficulty": "easy",
+      "average_score": 0.82,
+      "min_score": 0.35,
+      "max_score": 1.0,
+      "scores": [
+        0.75,
+        1.0,
+        1.0,
+        0.35,
+        1.0
+      ]
+    },
+    {
+      "task_id": "task_2_diagnose",
+      "task_name": "Root Cause Diagnosis",
+      "difficulty": "medium",
+      "average_score": 0.5864,
+      "min_score": 0.15,
+      "max_score": 0.8286,
+      "scores": [
+        0.7,
+        0.8286,
+        0.4286,
+        0.15,
+        0.825
+      ]
+    },
+    {
+      "task_id": "task_3_resolve",
+      "task_name": "Full Incident Resolution",
+      "difficulty": "hard",
+      "average_score": 0.612,
+      "min_score": 0.37,
+      "max_score": 0.87,
+      "scores": [
+        0.72,
+        0.66,
+        0.44,
+        0.37,
+        0.87
+      ]
+    }
+  ]
+}
