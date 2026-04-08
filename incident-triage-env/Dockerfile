@@ -1,5 +1,8 @@
 FROM python:3.11.8-slim
 
+# Ensure standard output is not buffered by Python so the grader catches all logs
+ENV PYTHONUNBUFFERED=1
+
 WORKDIR /app
 
 # Install system deps
