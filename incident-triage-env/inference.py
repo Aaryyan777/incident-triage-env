@@ -32,11 +32,8 @@ from server.tasks import TASKS, grade
 
 # ── Configuration from environment variables ──────────────────────────────────
 
-API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
-MODEL_NAME = os.getenv("MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
-API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
-if not API_KEY:
-    pass
+API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 
 SYSTEM_PROMPT = """You are an experienced Site Reliability Engineer (SRE) handling IT incidents.
 You will be given an IT incident with symptoms, logs, metrics, and context.
@@ -81,50 +78,54 @@ def _build_incident_prompt(obs_dict: Dict, task: Any) -> str:
     )
 
 
-def run_llm_episode(
-    task_id: str,
-    incident_index: int,
-    seed: int,
-    client: OpenAI,
-) -> Dict[str, Any]:
-    """Run an LLM agent on a single task/incident combination."""
+def run_llm_episode(task_id: str, incident_index: int, seed: int, client: OpenAI) -> Dict[str, Any]:
     print(f"[START] task={task_id} env=incident-triage model={MODEL_NAME}", flush=True)
-    env = IncidentTriageEnvironment()
-    obs = env.reset(seed=seed, task_id=task_id, incident_index=incident_index)
-    obs_dict = asdict(obs)
-    task = TASKS[task_id]
 
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": _build_incident_prompt(obs_dict, task)},
-    ]
-
+    env = None
+    rewards = []
     step_count = 0
-    while not env.is_done and step_count < task.max_steps:
-        try:
+    success = False
+
+    try:
+        env = IncidentTriageEnvironment()
+        obs = env.reset(seed=seed, task_id=task_id, incident_index=incident_index)
+        obs_dict = asdict(obs)
+        task = TASKS[task_id]
+
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": _build_incident_prompt(obs_dict, task)},
+        ]
+
+        while not env.is_done and step_count < task.max_steps:
             response = client.chat.completions.create(
                 model=MODEL_NAME,
                 messages=messages,
                 temperature=0.0,
                 max_tokens=500,
             )
+
             action_text = response.choices[0].message.content.strip()
 
-            # Parse JSON — handle markdown code blocks if model wraps response
             clean_text = action_text
             if clean_text.startswith("```"):
                 lines = clean_text.split("\n")
                 clean_text = "\n".join(lines[1:-1])
 
             action_dict = json.loads(clean_text)
-
             if "action_type" not in action_dict:
                 break
 
             obs = env.step(action_dict)
             obs_dict = asdict(obs)
             step_count += 1
-            print(f"[STEP] step={step_count} action={json.dumps(action_dict)} reward={obs_dict['reward']:.2f} done={str(obs_dict['done']).lower()} error=null", flush=True)
+            rewards.append(float(obs_dict["reward"]))
+
+            print(
+                f"[STEP] step={step_count} action={json.dumps(action_dict)} "
+                f"reward={obs_dict['reward']:.2f} done={'true' if obs_dict['done'] else 'false'} error=null",
+                flush=True,
+            )
 
             messages.append({"role": "assistant", "content": action_text})
             messages.append({"role": "user", "content": (
@@ -135,27 +136,30 @@ def run_llm_episode(
                 f"Take your next action. Respond with JSON only."
             )})
 
-        except json.JSONDecodeError as e:
-            # If model doesn't return valid JSON, try to extract it
-            action_fallback = {"action_type": "invalid_json"}
-            print(f"[STEP] step={step_count} action={json.dumps(action_fallback)} reward=0.00 done=false error=\"{str(e)}\"", flush=True)
-            break
-        except Exception as e:
-            action_fallback = {"action_type": "error"}
-            print(f"[STEP] step={step_count} action={json.dumps(action_fallback)} reward=0.00 done=false error=\"{str(e)}\"", flush=True)
-            break
+        success = grade(task_id, env.state, env.current_incident) >= 0.5
 
-    score = grade(task_id, env.state, env.current_incident)
-    success_str = "true" if score >= 0.5 else "false"
-    total_reward = env.state.total_reward
-    print(f"[END] success={success_str} steps={step_count} rewards={total_reward:.2f}", flush=True)
-    
+    except Exception:
+        success = False
+
+    finally:
+        if env is not None:
+            try:
+                env.close()
+            except Exception:
+                pass
+
+        rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+        print(
+            f"[END] success={'true' if success else 'false'} steps={step_count} rewards={rewards_str}",
+            flush=True,
+        )
+
     return {
         "task_id": task_id,
         "incident_index": incident_index,
-        "score": score,
+        "score": 1.0 if success else 0.0,
         "steps": step_count,
-        "total_reward": round(env.state.total_reward, 4),
+        "total_reward": round(sum(rewards), 4) if rewards else 0.0,
     }
 
 
@@ -231,48 +235,84 @@ def _heuristic_remediate(root_cause: str) -> str:
 def run_heuristic_episode(task_id: str, incident_index: int, seed: int) -> Dict:
     """Run a heuristic baseline on a single episode."""
     print(f"[START] task={task_id} env=incident-triage model=baseline_heuristic", flush=True)
-    env = IncidentTriageEnvironment()
-    obs = env.reset(seed=seed, task_id=task_id, incident_index=incident_index)
-    obs_dict = asdict(obs)
-    task = TASKS[task_id]
 
-    def _step(action: dict):
-        nonlocal obs, obs_dict
-        try:
-            obs = env.step(action)
-            obs_dict = asdict(obs)
-            print(f"[STEP] step={env.state.step_count} action={json.dumps(action)} reward={obs_dict['reward']:.2f} done={str(obs_dict['done']).lower()} error=null", flush=True)
-        except Exception as e:
-            print(f"[STEP] step={env.state.step_count} action={json.dumps(action)} reward=0.00 done=false error=\"{str(e)}\"", flush=True)
+    env = None
+    rewards = []
+    step_count = 0
+    success = False
 
-    severity = _heuristic_classify_severity(obs_dict)
-    _step({"action_type": "classify_severity", "severity": severity})
-    team = _heuristic_assign_team(obs_dict)
-    _step({"action_type": "assign_team", "team": team})
+    try:
+        env = IncidentTriageEnvironment()
+        obs = env.reset(seed=seed, task_id=task_id, incident_index=incident_index)
+        obs_dict = asdict(obs)
+        task = TASKS[task_id]
 
-    root_cause, explanation = "", ""
-    if task_id in ("task_2_diagnose", "task_3_resolve"):
-        root_cause, explanation = _heuristic_diagnose(obs_dict)
-        _step({"action_type": "diagnose", "root_cause": root_cause, "explanation": explanation})
+        def _step(action: dict):
+            nonlocal obs, obs_dict, step_count
+            try:
+                obs = env.step(action)
+                obs_dict = asdict(obs)
+                step_count += 1
+                rewards.append(float(obs_dict["reward"]))
+                print(
+                    f"[STEP] step={step_count} action={json.dumps(action)} "
+                    f"reward={obs_dict['reward']:.2f} done={'true' if obs_dict['done'] else 'false'} error=null",
+                    flush=True,
+                )
+            except Exception as e:
+                print(
+                    f"[STEP] step={step_count + 1} action={json.dumps(action)} "
+                    f"reward=0.00 done=false error=\"{str(e)}\"",
+                    flush=True,
+                )
 
-    if task_id == "task_3_resolve":
-        remediation = _heuristic_remediate(root_cause)
-        _step({"action_type": "remediate", "remediation": remediation})
-        _step({
-            "action_type": "communicate",
-            "message": f"Incident on {obs_dict['service_affected']}: severity {severity}. Root cause: {root_cause}. Applied {remediation}.",
-            "audience": "engineering",
-        })
-        _step({
-            "action_type": "resolve",
-            "summary": f"Resolved. Root cause was {root_cause.replace('_', ' ')}. Applied {remediation.replace('_', ' ')} to remediate.",
-        })
+        severity = _heuristic_classify_severity(obs_dict)
+        _step({"action_type": "classify_severity", "severity": severity})
 
-    score = grade(task_id, env.state, env.current_incident)
-    success_str = "true" if score >= 0.5 else "false"
-    total_reward = env.state.total_reward
-    print(f"[END] success={success_str} steps={env.state.step_count} rewards={total_reward:.2f}", flush=True)
-    return {"task_id": task_id, "incident_index": incident_index, "score": score, "steps": env.state.step_count}
+        team = _heuristic_assign_team(obs_dict)
+        _step({"action_type": "assign_team", "team": team})
+
+        root_cause, explanation = "", ""
+        if task_id in ("task_2_diagnose", "task_3_resolve"):
+            root_cause, explanation = _heuristic_diagnose(obs_dict)
+            _step({"action_type": "diagnose", "root_cause": root_cause, "explanation": explanation})
+
+        if task_id == "task_3_resolve":
+            remediation = _heuristic_remediate(root_cause)
+            _step({"action_type": "remediate", "remediation": remediation})
+            _step({
+                "action_type": "communicate",
+                "message": f"Incident on {obs_dict['service_affected']}: severity {severity}. Root cause: {root_cause}. Applied {remediation}.",
+                "audience": "engineering",
+            })
+            _step({
+                "action_type": "resolve",
+                "summary": f"Resolved. Root cause was {root_cause.replace('_', ' ')}. Applied {remediation.replace('_', ' ')} to remediate.",
+            })
+
+        success = grade(task_id, env.state, env.current_incident) >= 0.5
+
+    except Exception:
+        success = False
+
+    finally:
+        if env is not None:
+            try:
+                env.close()
+            except Exception:
+                pass
+
+        print(
+            f"[END] success={'true' if success else 'false'} steps={step_count} rewards={','.join(f'{r:.2f}' for r in rewards)}",
+            flush=True,
+        )
+
+    return {
+        "task_id": task_id,
+        "incident_index": incident_index,
+        "score": 1.0 if success else 0.0,
+        "steps": step_count,
+    }
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -280,15 +320,16 @@ def run_heuristic_episode(task_id: str, incident_index: int, seed: int) -> Dict:
 def main():
     start_time = time.time()
 
-    use_llm = bool(API_KEY)
+    HF_TOKEN = os.getenv("HF_TOKEN")
+    if HF_TOKEN is None:
+        raise ValueError("HF_TOKEN environment variable is required")
 
-    if use_llm:
-        client = OpenAI(
-            api_key=API_KEY,
-            base_url=API_BASE_URL,
-        )
-    else:
-        client = None
+    use_llm = True
+
+    client = OpenAI(
+        api_key=HF_TOKEN,
+        base_url=API_BASE_URL,
+    )
 
     # Run 5 incidents per task for reasonable runtime (< 20 min)
     NUM_INCIDENTS = 5
