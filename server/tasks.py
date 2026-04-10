@@ -362,9 +362,11 @@ GRADERS = {
 
 
 def grade(task_id: str, state: Any, incident: Any) -> float:
-    """Grade an episode for the given task. Returns score in [0.0, 1.0]."""
+    """Grade an episode for the given task. Returns score in (0.0, 1.0) exclusive."""
     grader = GRADERS.get(task_id)
     if grader is None:
         raise ValueError(f"Unknown task: {task_id}. Available: {list(GRADERS.keys())}")
-    return grader(state, incident)
+    raw_score = grader(state, incident)
+    # Clamp to strict open interval (0, 1) — validator rejects exact 0.0 and 1.0
+    return round(min(0.999, max(0.001, raw_score)), 4)
 
