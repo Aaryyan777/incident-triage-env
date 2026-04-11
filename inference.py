@@ -119,11 +119,12 @@ def run_llm_episode(task_id: str, incident_index: int, seed: int, client: OpenAI
             obs = env.step(action_dict)
             obs_dict = asdict(obs)
             step_count += 1
-            rewards.append(float(obs_dict["reward"]))
+            clamped_reward = min(0.99, max(0.01, float(obs_dict["reward"])))
+            rewards.append(clamped_reward)
 
             print(
                 f"[STEP] step={step_count} action={json.dumps(action_dict)} "
-                f"reward={obs_dict['reward']:.2f} done={'true' if obs_dict['done'] else 'false'} error=null",
+                f"reward={clamped_reward:.2f} done={'true' if obs_dict['done'] else 'false'} error=null",
                 flush=True,
             )
 
@@ -253,16 +254,17 @@ def run_heuristic_episode(task_id: str, incident_index: int, seed: int) -> Dict:
                 obs = env.step(action)
                 obs_dict = asdict(obs)
                 step_count += 1
-                rewards.append(float(obs_dict["reward"]))
+                clamped_reward = min(0.99, max(0.01, float(obs_dict["reward"])))
+                rewards.append(clamped_reward)
                 print(
                     f"[STEP] step={step_count} action={json.dumps(action)} "
-                    f"reward={obs_dict['reward']:.2f} done={'true' if obs_dict['done'] else 'false'} error=null",
+                    f"reward={clamped_reward:.2f} done={'true' if obs_dict['done'] else 'false'} error=null",
                     flush=True,
                 )
             except Exception as e:
                 print(
                     f"[STEP] step={step_count + 1} action={json.dumps(action)} "
-                    f"reward=0.00 done=false error=\"{str(e)}\"",
+                    f"reward=0.01 done=false error=\"{str(e)}\"",
                     flush=True,
                 )
 
